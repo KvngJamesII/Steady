@@ -21,9 +21,13 @@ function createAuthHeader() {
 async function initializeBrowser() {
   try {
     console.log('🌐 Initializing browser...');
-    
+
+    // ✅ make sure Puppeteer uses the right Chrome binary
+    const chromePath = puppeteer.executablePath();
+
     browser = await puppeteer.launch({
       headless: true,
+      executablePath: chromePath,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -33,19 +37,19 @@ async function initializeBrowser() {
     });
 
     page = await browser.newPage();
-    
+
     await page.setExtraHTTPHeaders({
       'Authorization': createAuthHeader()
     });
-    
+
     console.log('🔄 Navigating to API and solving Cloudflare challenge...');
     await page.goto(config.API_URL, {
       waitUntil: 'networkidle2',
       timeout: 60000
     });
-    
+
     await new Promise(resolve => setTimeout(resolve, 3000));
-    
+
     console.log('✓ Browser initialized and ready');
     return true;
   } catch (error) {
@@ -65,7 +69,7 @@ async function fetchLatestSMS() {
       }
     }
 
-    const url = lastSmsId > 0 
+    const url = lastSmsId > 0
       ? `${config.API_URL}?per-page=${config.MAX_PER_PAGE}&id=${lastSmsId}`
       : `${config.API_URL}?per-page=${config.MAX_PER_PAGE}`;
 
@@ -77,36 +81,21 @@ async function fetchLatestSMS() {
             'Accept': 'application/json'
           }
         });
-        
+
         if (response.ok) {
-          return {
-            success: true,
-            data: await response.json()
-          };
+          return { success: true, data: await response.json() };
         } else {
-          return {
-            success: false,
-            status: response.status,
-            statusText: response.statusText
-          };
+          return { success: false, status: response.status, statusText: response.statusText };
         }
       } catch (err) {
-        return {
-          success: false,
-          error: err.message
-        };
+        return { success: false, error: err.message };
       }
     }, url, createAuthHeader());
 
     if (smsData && smsData.success && Array.isArray(smsData.data)) {
       return smsData.data;
     } else if (smsData && !smsData.success) {
-      if (smsData.status) {
-        console.log(`API returned status: ${smsData.status}`);
-      } else if (smsData.error) {
-        console.log(`Fetch Error: ${smsData.error}`);
-      }
-      
+      console.log(smsData.status ? `API returned status: ${smsData.status}` : `Fetch Error: ${smsData.error}`);
       return [];
     } else {
       console.log('Unexpected response format');
@@ -114,13 +103,9 @@ async function fetchLatestSMS() {
     }
   } catch (error) {
     console.error('Error fetching SMS:', error.message);
-    
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    if (browser) await browser.close().catch(() => {});
     browser = null;
     page = null;
-    
     return [];
   }
 }
@@ -128,23 +113,17 @@ async function fetchLatestSMS() {
 async function sendOTPToTelegram(smsData) {
   try {
     console.log('SMS Data received:', JSON.stringify(smsData, null, 2));
-    
     const source = smsData.source_addr || 'Unknown Source';
     const destination = smsData.destination_addr || 'Unknown Destination';
     let message = smsData.short_message || 'No content';
-    
-    // Remove Unicode null bytes if present
     message = message.replace(/\u0000/g, '');
-    
+
     const formattedMessage = `
 🔔 *NEW OTP RECEIVED*
 ━━━━━━━━━━━━━━━━━━━━
 
-📤 *Source:*
-\`${source}\`
-
-📱 *Destination:*
-\`${destination}\`
+📤 *Source:* \`${source}\`
+📱 *Destination:* \`${destination}\`
 
 💬 *Message:*
 \`\`\`
@@ -172,19 +151,15 @@ async function pollSMSAPI() {
 
   try {
     const smsMessages = await fetchLatestSMS();
-
     if (smsMessages.length > 0) {
       console.log(`📬 Found ${smsMessages.length} new SMS message(s)`);
-
       for (const sms of smsMessages) {
         const smsId = sms.id || 0;
-        
         if (smsId > lastSmsId) {
           await sendOTPToTelegram(sms);
           lastSmsId = smsId;
         }
       }
-
       console.log(`Updated last SMS ID to: ${lastSmsId}`);
     } else {
       console.log('No new SMS messages');
@@ -207,11 +182,7 @@ bot.onText(/\/start/, (msg) => {
 
 bot.onText(/\/status/, (msg) => {
   const chatId = msg.chat.id;
-  const statusMessage = `📊 Bot Status:\n` +
-    `✅ Running\n` +
-    `🆔 Last SMS ID: ${lastSmsId}\n` +
-    `⏱️ Poll Interval: ${config.POLL_INTERVAL / 1000}s\n` +
-    `🌐 Browser: ${browser ? 'Active' : 'Not initialized'}`;
+  const statusMessage = `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL / 1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}`;
   bot.sendMessage(chatId, statusMessage);
 });
 
@@ -219,11 +190,8 @@ async function startBot() {
   console.log('🚀 Telegram OTP Bot started!');
   console.log(`📡 Polling SMS API every ${config.POLL_INTERVAL / 1000} seconds`);
   console.log(`💬 Forwarding to: ${config.TELEGRAM_CHAT_ID}`);
-  
   await initializeBrowser();
-  
   pollSMSAPI();
-  
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
 }
 
@@ -231,8 +199,6 @@ startBot();
 
 process.on('SIGINT', async () => {
   console.log('\n🛑 Shutting down bot...');
-  if (browser) {
-    await browser.close();
-  }
+  if (browser) await browser.close();
   process.exit();
 });
