@@ -137,11 +137,34 @@ ${message}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ _${new Date().toLocaleString()}_
 `;
-    await bot.sendMessage(config.TELEGRAM_CHAT_ID, formatted, { parse_mode: 'Markdown' });
-    console.log(`✓ Sent OTP from ${source} to Telegram`);
+
+    // Send to all channels
+    for (const chatId of config.TELEGRAM_CHAT_IDS) {
+      try {
+        await bot.sendMessage(chatId, formatted, { parse_mode: 'Markdown' });
+        console.log(`✓ Sent OTP from ${source} to channel ${chatId}`);
+      } catch (err) {
+        console.error(`Failed to send to channel ${chatId}:`, err.message);
+      }
+    }
   } catch (err) {
     console.error('Failed to send Telegram message:', err.message);
   }
+}
+
+async function sendToAllChannels(message, options = {}) {
+  const results = [];
+  for (const chatId of config.TELEGRAM_CHAT_IDS) {
+    try {
+      await bot.sendMessage(chatId, message, options);
+      results.push({ chatId, success: true });
+      console.log(`✓ Message sent to channel ${chatId}`);
+    } catch (err) {
+      results.push({ chatId, success: false, error: err.message });
+      console.error(`Failed to send to channel ${chatId}:`, err.message);
+    }
+  }
+  return results;
 }
 
 async function pollSMSAPI() {
@@ -177,6 +200,7 @@ const server = http.createServer((req, res) => {
       uptime: process.uptime(),
       lastSmsId: lastSmsId,
       browserActive: !!browser,
+      activeChannels: config.TELEGRAM_CHAT_IDS.length,
       timestamp: new Date().toISOString()
     }));
   } else {
@@ -210,10 +234,17 @@ async function startBot() {
     const hours = Math.floor(uptime / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
     
-    bot.sendMessage(msg.chat.id,
-      `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}\n⏰ Uptime: ${hours}h ${minutes}m`,
-      { parse_mode: 'Markdown' }
-    );
+    const statusMessage = `📊 *Bot Status*
+━━━━━━━━━━━━━━━━━━━━
+✅ Status: Running
+🆔 Last SMS ID: ${lastSmsId}
+⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s
+🌐 Browser: ${browser ? 'Active' : 'Not initialized'}
+📡 Active Channels: ${config.TELEGRAM_CHAT_IDS.length}
+⏰ Uptime: ${hours}h ${minutes}m
+━━━━━━━━━━━━━━━━━━━━`;
+    
+    bot.sendMessage(msg.chat.id, statusMessage, { parse_mode: 'Markdown' });
   });
 
   // Handle polling errors
@@ -227,11 +258,24 @@ async function startBot() {
   });
 
   console.log(`📡 Polling every ${config.POLL_INTERVAL/1000}s`);
-  console.log(`💬 Forwarding to: ${config.TELEGRAM_CHAT_ID}`);
+  console.log(`💬 Forwarding to ${config.TELEGRAM_CHAT_IDS.length} channels:`);
+  config.TELEGRAM_CHAT_IDS.forEach(id => console.log(`   - ${id}`));
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
   // Initialize browser and start polling
-  await initializeBrowser();
+  const browserInitialized = await initializeBrowser();
+  
+  if (browserInitialized) {
+    // Send connection success message to all channels
+    const connectionMessage = `✅ *OTP Bot Connected*
+
+The bot is now active and monitoring for OTPs.
+Use /status anytime you want to check connection status.`;
+    
+    await sendToAllChannels(connectionMessage, { parse_mode: 'Markdown' });
+    console.log('✅ Connection notification sent to all channels\n');
+  }
+
   await pollSMSAPI();
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
 }
