@@ -13,6 +13,13 @@ let isPolling = false;
 let browser = null;
 let page = null;
 let bot = null;
+let reconnectAttempts = 0;
+let lastSuccessfulPoll = Date.now();
+let pollCount = 0;
+
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 5000;
+const HEALTH_CHECK_INTERVAL = 60000; // Check every 1 minute
 
 function createAuthHeader() {
   const credentials = `${config.API_USERNAME}:${config.API_PASSWORD}`;
@@ -48,7 +55,9 @@ async function initializeBrowser() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions'
       ]
     });
 
@@ -60,6 +69,7 @@ async function initializeBrowser() {
     await new Promise(r => setTimeout(r, 3000));
 
     console.log('✅ Browser initialized and ready');
+    reconnectAttempts = 0; // Reset reconnect counter on success
     return true;
   } catch (err) {
     console.error('❌ Failed to initialize browser:', err.message);
@@ -67,12 +77,42 @@ async function initializeBrowser() {
   }
 }
 
+async function ensureBrowserActive() {
+  try {
+    if (!browser || !page) {
+      console.log('⚠️ Browser not active, reinitializing...');
+      return await initializeBrowser();
+    }
+
+    // Test if browser is still responsive
+    await page.evaluate(() => true);
+    return true;
+  } catch (err) {
+    console.error('⚠️ Browser not responsive:', err.message);
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    browser = null;
+    page = null;
+    
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      reconnectAttempts++;
+      console.log(`🔄 Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
+      await new Promise(r => setTimeout(r, RECONNECT_DELAY));
+      return await initializeBrowser();
+    } else {
+      console.error('❌ Max reconnection attempts reached');
+      return false;
+    }
+  }
+}
+
 async function fetchLatestSMS() {
   try {
-    if (!page) {
-      console.log('No browser page, initializing...');
-      const success = await initializeBrowser();
-      if (!success) return [];
+    const browserActive = await ensureBrowserActive();
+    if (!browserActive) {
+      console.log('❌ Browser initialization failed, skipping this poll');
+      return [];
     }
 
     const url = lastSmsId > 0
@@ -98,6 +138,7 @@ async function fetchLatestSMS() {
     }, url, createAuthHeader());
 
     if (smsData && smsData.success && Array.isArray(smsData.data)) {
+      lastSuccessfulPoll = Date.now();
       return smsData.data;
     }
     
@@ -105,15 +146,13 @@ async function fetchLatestSMS() {
       if (smsData.status === 429) {
         console.log('⚠️ API Rate limit hit - waiting longer...');
       } else {
-        console.log(smsData.status ? `API status: ${smsData.status}` : `Fetch error: ${smsData.error}`);
+        console.log(smsData.status ? `⚠️ API status: ${smsData.status}` : `⚠️ Fetch error: ${smsData.error}`);
       }
     }
     return [];
   } catch (err) {
-    console.error('Error fetching SMS:', err.message);
-    if (browser) await browser.close().catch(() => {});
-    browser = null; 
-    page = null;
+    console.error('❌ Error fetching SMS:', err.message);
+    // Don't close browser here, let ensureBrowserActive handle it
     return [];
   }
 }
@@ -144,11 +183,11 @@ ${message}
         await bot.sendMessage(chatId, formatted, { parse_mode: 'Markdown' });
         console.log(`✓ Sent OTP from ${source} to channel ${chatId}`);
       } catch (err) {
-        console.error(`Failed to send to channel ${chatId}:`, err.message);
+        console.error(`❌ Failed to send to channel ${chatId}:`, err.message);
       }
     }
   } catch (err) {
-    console.error('Failed to send Telegram message:', err.message);
+    console.error('❌ Failed to send Telegram message:', err.message);
   }
 }
 
@@ -161,20 +200,32 @@ async function sendToAllChannels(message, options = {}) {
       console.log(`✓ Message sent to channel ${chatId}`);
     } catch (err) {
       results.push({ chatId, success: false, error: err.message });
-      console.error(`Failed to send to channel ${chatId}:`, err.message);
+      console.error(`❌ Failed to send to channel ${chatId}:`, err.message);
     }
   }
   return results;
 }
 
 async function pollSMSAPI() {
-  if (isPolling) return;
+  if (isPolling) {
+    console.log('⏭️ Skipping poll - previous poll still in progress');
+    return;
+  }
+  
   isPolling = true;
+  pollCount++;
 
   try {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString();
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📡 Poll #${pollCount} at ${timeStr}`);
+    console.log(`🔍 Checking for new SMS messages...`);
+    
     const messages = await fetchLatestSMS();
+    
     if (messages.length) {
-      console.log(`📬 Found ${messages.length} new SMS`);
+      console.log(`📬 Found ${messages.length} new SMS message(s)`);
       for (const sms of messages) {
         if ((sms.id || 0) > lastSmsId) {
           await sendOTPToTelegram(sms);
@@ -184,23 +235,55 @@ async function pollSMSAPI() {
     } else {
       console.log('📭 No new SMS messages');
     }
+    
+    console.log(`✅ Poll completed successfully`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
   } catch (err) {
-    console.error('Polling error:', err.message);
+    console.error('❌ Polling error:', err.message);
   } finally {
     isPolling = false;
+  }
+}
+
+// Health check function
+async function performHealthCheck() {
+  const timeSinceLastPoll = Date.now() - lastSuccessfulPoll;
+  const minutesSinceLastPoll = Math.floor(timeSinceLastPoll / 60000);
+  
+  console.log(`\n🏥 Health Check:`);
+  console.log(`   - Browser: ${browser ? '✅ Active' : '❌ Inactive'}`);
+  console.log(`   - Last successful poll: ${minutesSinceLastPoll} minute(s) ago`);
+  console.log(`   - Total polls: ${pollCount}`);
+  console.log(`   - Last SMS ID: ${lastSmsId}\n`);
+  
+  // If no successful poll in 5 minutes, try to reconnect
+  if (timeSinceLastPoll > 300000 && browser) {
+    console.log('⚠️ No successful poll in 5 minutes, forcing reconnection...');
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    browser = null;
+    page = null;
+    await ensureBrowserActive();
   }
 }
 
 // Create HTTP server for Render health checks
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const timeSinceLastPoll = Date.now() - lastSuccessfulPoll;
+    const isHealthy = timeSinceLastPoll < 300000; // Healthy if polled within last 5 minutes
+    
+    res.writeHead(isHealthy ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: 'ok',
+      status: isHealthy ? 'ok' : 'degraded',
       uptime: process.uptime(),
       lastSmsId: lastSmsId,
       browserActive: !!browser,
       activeChannels: config.TELEGRAM_CHAT_IDS.length,
+      pollCount: pollCount,
+      lastSuccessfulPoll: new Date(lastSuccessfulPoll).toISOString(),
+      timeSinceLastPoll: `${Math.floor(timeSinceLastPoll / 1000)}s`,
       timestamp: new Date().toISOString()
     }));
   } else {
@@ -221,26 +304,30 @@ async function startBot() {
     console.log(`🌐 Health check server running on port ${PORT}`);
   });
 
-  // Initialize Telegram bot with webhook mode to avoid conflicts
+  // Initialize Telegram bot
   bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
 
   // Bot commands
   bot.onText(/\/start/, (msg) => 
-    bot.sendMessage(msg.chat.id, '🤖 OTP Bot active!')
+    bot.sendMessage(msg.chat.id, '🤖 OTP Bot active! Use /status to check connection.')
   );
 
   bot.onText(/\/status/, (msg) => {
     const uptime = process.uptime();
     const hours = Math.floor(uptime / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
+    const timeSinceLastPoll = Date.now() - lastSuccessfulPoll;
+    const minutesSinceLastPoll = Math.floor(timeSinceLastPoll / 60000);
     
     const statusMessage = `📊 *Bot Status*
 ━━━━━━━━━━━━━━━━━━━━
-✅ Status: Running
+✅ Status: ${browser ? 'Running' : 'Reconnecting...'}
 🆔 Last SMS ID: ${lastSmsId}
 ⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s
-🌐 Browser: ${browser ? 'Active' : 'Not initialized'}
+🌐 Browser: ${browser ? 'Active ✅' : 'Inactive ❌'}
 📡 Active Channels: ${config.TELEGRAM_CHAT_IDS.length}
+📊 Total Polls: ${pollCount}
+🕐 Last Poll: ${minutesSinceLastPoll}m ago
 ⏰ Uptime: ${hours}h ${minutes}m
 ━━━━━━━━━━━━━━━━━━━━`;
     
@@ -251,9 +338,9 @@ async function startBot() {
   bot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
       console.error('💥 Multiple instances detected! Stopping this instance...');
-      process.exit(1); // Exit to let Render restart with single instance
+      process.exit(1);
     } else {
-      console.error('Telegram error:', error.code, error.message);
+      console.error('⚠️ Telegram polling error:', error.code, error.message);
     }
   });
 
@@ -270,31 +357,59 @@ async function startBot() {
     const connectionMessage = `✅ *OTP Bot Connected*
 
 The bot is now active and monitoring for OTPs.
-Use /status anytime you want to check connection status.`;
+Use /status anytime you want to check connection status.
+
+⏱️ Poll interval: ${config.POLL_INTERVAL/1000}s`;
     
     await sendToAllChannels(connectionMessage, { parse_mode: 'Markdown' });
     console.log('✅ Connection notification sent to all channels\n');
   }
 
+  // Start polling immediately
   await pollSMSAPI();
+  
+  // Set up regular polling interval
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
+  
+  // Set up health check interval
+  setInterval(performHealthCheck, HEALTH_CHECK_INTERVAL);
+  
+  console.log('✅ All systems initialized and running\n');
 }
 
 // Graceful shutdown
 async function shutdown() {
   console.log('\n🛑 Shutting down bot...');
+  
+  // Notify channels about shutdown
   if (bot) {
+    const shutdownMessage = '⚠️ *Bot Shutting Down*\n\nThe OTP bot is being stopped.';
+    await sendToAllChannels(shutdownMessage, { parse_mode: 'Markdown' }).catch(() => {});
     await bot.stopPolling();
   }
+  
   if (browser) {
     await browser.close();
   }
+  
   server.close();
+  console.log('✅ Shutdown complete');
   process.exit(0);
 }
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Handle uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('💥 Uncaught Exception:', err);
+  // Don't exit, try to recover
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('💥 Unhandled Rejection:', err);
+  // Don't exit, try to recover
+});
 
 // Start the bot
 startBot();
