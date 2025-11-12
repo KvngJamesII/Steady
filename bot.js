@@ -1,8 +1,9 @@
 const TelegramBot = require('node-telegram-bot-api');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const config = require('./config');
 const { execSync } = require('child_process');
+const fs = require('fs');
+const config = require('./config');
 
 puppeteer.use(StealthPlugin());
 
@@ -15,23 +16,29 @@ let page = null;
 
 function createAuthHeader() {
   const credentials = `${config.API_USERNAME}:${config.API_PASSWORD}`;
-  const base64Credentials = Buffer.from(credentials).toString('base64');
-  return `Basic ${base64Credentials}`;
+  return `Basic ${Buffer.from(credentials).toString('base64')}`;
 }
 
 async function initializeBrowser() {
   try {
     console.log('🌐 Initializing browser...');
 
-    let chromePath;
-    try {
-      chromePath = puppeteer.executablePath();
-      console.log('🧭 Using Puppeteer Chrome at:', chromePath);
-    } catch (err) {
-      console.log('⚠️ Chrome not found, installing Chromium...');
-      execSync('npx puppeteer browsers install chrome', { stdio: 'inherit' });
-      chromePath = puppeteer.executablePath();
-      console.log('✅ Chromium installed at:', chromePath);
+    let chromePath = '/usr/bin/google-chrome'; // default system Chrome on Render
+
+    if (!fs.existsSync(chromePath)) {
+      console.log('⚠️ System Chrome not found, checking Puppeteer...');
+      try {
+        chromePath = puppeteer.executablePath();
+        if (!fs.existsSync(chromePath)) throw new Error('Puppeteer Chrome missing');
+        console.log('🧭 Using Puppeteer Chrome at:', chromePath);
+      } catch {
+        console.log('⚙️ Installing Chromium manually...');
+        execSync('npx puppeteer browsers install chrome', { stdio: 'inherit' });
+        chromePath = puppeteer.executablePath();
+        console.log('✅ Installed Chromium at:', chromePath);
+      }
+    } else {
+      console.log('🧭 Using system Chrome at:', chromePath);
     }
 
     browser = await puppeteer.launch({
@@ -46,23 +53,16 @@ async function initializeBrowser() {
     });
 
     page = await browser.newPage();
+    await page.setExtraHTTPHeaders({ 'Authorization': createAuthHeader() });
 
-    await page.setExtraHTTPHeaders({
-      'Authorization': createAuthHeader()
-    });
+    console.log('🔄 Navigating to API...');
+    await page.goto(config.API_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
 
-    console.log('🔄 Navigating to API and solving Cloudflare challenge...');
-    await page.goto(config.API_URL, {
-      waitUntil: 'networkidle2',
-      timeout: 60000
-    });
-
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    console.log('✓ Browser initialized and ready');
+    console.log('✅ Browser initialized and ready');
     return true;
-  } catch (error) {
-    console.error('Failed to initialize browser:', error.message);
+  } catch (err) {
+    console.error('❌ Failed to initialize browser:', err.message);
     return false;
   }
 }
@@ -70,12 +70,9 @@ async function initializeBrowser() {
 async function fetchLatestSMS() {
   try {
     if (!page) {
-      console.log('No browser page available, initializing...');
+      console.log('No browser page, initializing...');
       const success = await initializeBrowser();
-      if (!success) {
-        console.log('Failed to initialize browser, will retry next poll');
-        return [];
-      }
+      if (!success) return [];
     }
 
     const url = lastSmsId > 0
@@ -84,50 +81,32 @@ async function fetchLatestSMS() {
 
     const smsData = await page.evaluate(async (apiUrl, authHeader) => {
       try {
-        const response = await fetch(apiUrl, {
-          headers: {
-            'Authorization': authHeader,
-            'Accept': 'application/json'
-          }
-        });
-
-        if (response.ok) {
-          return { success: true, data: await response.json() };
-        } else {
-          return { success: false, status: response.status, statusText: response.statusText };
-        }
+        const response = await fetch(apiUrl, { headers: { 'Authorization': authHeader, 'Accept': 'application/json' } });
+        if (response.ok) return { success: true, data: await response.json() };
+        else return { success: false, status: response.status, statusText: response.statusText };
       } catch (err) {
         return { success: false, error: err.message };
       }
     }, url, createAuthHeader());
 
-    if (smsData && smsData.success && Array.isArray(smsData.data)) {
-      return smsData.data;
-    } else if (smsData && !smsData.success) {
-      console.log(smsData.status ? `API returned status: ${smsData.status}` : `Fetch Error: ${smsData.error}`);
-      return [];
-    } else {
-      console.log('Unexpected response format');
-      return [];
-    }
-  } catch (error) {
-    console.error('Error fetching SMS:', error.message);
+    if (smsData && smsData.success && Array.isArray(smsData.data)) return smsData.data;
+    if (smsData && !smsData.success) console.log(smsData.status ? `API status: ${smsData.status}` : `Fetch error: ${smsData.error}`);
+    return [];
+  } catch (err) {
+    console.error('Error fetching SMS:', err.message);
     if (browser) await browser.close().catch(() => {});
-    browser = null;
-    page = null;
+    browser = null; page = null;
     return [];
   }
 }
 
-async function sendOTPToTelegram(smsData) {
+async function sendOTPToTelegram(sms) {
   try {
-    console.log('SMS Data received:', JSON.stringify(smsData, null, 2));
-    const source = smsData.source_addr || 'Unknown Source';
-    const destination = smsData.destination_addr || 'Unknown Destination';
-    let message = smsData.short_message || 'No content';
-    message = message.replace(/\u0000/g, '');
+    const source = sms.source_addr || 'Unknown';
+    const destination = sms.destination_addr || 'Unknown';
+    let message = (sms.short_message || 'No content').replace(/\u0000/g, '');
 
-    const formattedMessage = `
+    const formatted = `
 🔔 *NEW OTP RECEIVED*
 ━━━━━━━━━━━━━━━━━━━━
 📤 *Source:* \`${source}\`
@@ -140,62 +119,45 @@ ${message}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ _${new Date().toLocaleString()}_
 `;
-
-    await bot.sendMessage(config.TELEGRAM_CHAT_ID, formattedMessage, { parse_mode: 'Markdown' });
-    console.log(`✓ Sent OTP from ${source} to Telegram group`);
-  } catch (error) {
-    console.error('Failed to send message to Telegram:', error.message);
+    await bot.sendMessage(config.TELEGRAM_CHAT_ID, formatted, { parse_mode: 'Markdown' });
+    console.log(`✓ Sent OTP from ${source} to Telegram`);
+  } catch (err) {
+    console.error('Failed to send Telegram message:', err.message);
   }
 }
 
 async function pollSMSAPI() {
-  if (isPolling) {
-    console.log('Already polling, skipping...');
-    return;
-  }
-
+  if (isPolling) return;
   isPolling = true;
 
   try {
-    const smsMessages = await fetchLatestSMS();
-    if (smsMessages.length > 0) {
-      console.log(`📬 Found ${smsMessages.length} new SMS message(s)`);
-      for (const sms of smsMessages) {
-        const smsId = sms.id || 0;
-        if (smsId > lastSmsId) {
+    const messages = await fetchLatestSMS();
+    if (messages.length) {
+      console.log(`📬 Found ${messages.length} new SMS`);
+      for (const sms of messages) {
+        if ((sms.id || 0) > lastSmsId) {
           await sendOTPToTelegram(sms);
-          lastSmsId = smsId;
+          lastSmsId = sms.id || lastSmsId;
         }
       }
-      console.log(`Updated last SMS ID to: ${lastSmsId}`);
-    } else {
-      console.log('No new SMS messages');
-    }
-  } catch (error) {
-    console.error('Error during SMS polling:', error.message);
+    } else console.log('No new SMS messages');
+  } catch (err) {
+    console.error('Polling error:', err.message);
   } finally {
     isPolling = false;
   }
 }
 
-bot.on('polling_error', (error) => {
-  console.error('Telegram polling error:', error.code, error.message);
-});
-
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, '🤖 OTP Bot is active and monitoring for new SMS messages!');
-});
-
-bot.onText(/\/status/, (msg) => {
-  const chatId = msg.chat.id;
-  const statusMessage = `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL / 1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}`;
-  bot.sendMessage(chatId, statusMessage);
-});
+bot.onText(/\/start/, (msg) => bot.sendMessage(msg.chat.id, '🤖 OTP Bot active!'));
+bot.onText(/\/status/, (msg) => bot.sendMessage(msg.chat.id,
+  `📊 Bot Status:\n✅ Running\n🆔 Last SMS ID: ${lastSmsId}\n⏱️ Poll Interval: ${config.POLL_INTERVAL/1000}s\n🌐 Browser: ${browser ? 'Active' : 'Not initialized'}`
+));
 
 async function startBot() {
   console.log('🚀 Telegram OTP Bot started!');
-  console.log(`📡 Polling SMS API every ${config.POLL_INTERVAL / 1000} seconds`);
+  console.log(`📡 Polling every ${config.POLL_INTERVAL/1000}s`);
   console.log(`💬 Forwarding to: ${config.TELEGRAM_CHAT_ID}`);
+
   await initializeBrowser();
   pollSMSAPI();
   setInterval(pollSMSAPI, config.POLL_INTERVAL);
@@ -203,8 +165,4 @@ async function startBot() {
 
 startBot();
 
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down bot...');
-  if (browser) await browser.close();
-  process.exit();
-});
+process.on('SIGINT', async () => { console.log('🛑 Shutting down bot...'); if (browser) await browser.close(); process.exit(); });
