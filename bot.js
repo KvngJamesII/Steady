@@ -113,8 +113,7 @@ async function initializeBrowser() {
         '--disable-web-security',
         '--disable-blink-features=AutomationControlled',
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      ],
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/root/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome'
+      ]
     });
 
     page = await browser.newPage();
