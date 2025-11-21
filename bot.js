@@ -329,19 +329,30 @@ async function fetchLatestSMS() {
     if (responseData && responseData.aaData) {
       lastSuccessfulPoll = Date.now();
       const crypto = require('crypto');
-      const messages = responseData.aaData.map((row) => {
-        const msgData = `${row[0]}_${row[2]}_${row[3]}_${row[5]}`;
-        const hash = crypto.createHash('md5').update(msgData).digest('hex');
-        
-        return {
-          hash: hash,
-          date: row[0] || '',
-          destination_addr: row[2] || '',
-          source_addr: row[3] || '',
-          client: row[4] || '',
-          short_message: row[5] || ''
-        };
-      });
+      const messages = responseData.aaData
+        .filter((row) => {
+          // Filter out rows with no meaningful content
+          const hasMessage = row[5] && row[5].trim().length > 0;
+          const hasSource = row[3] && row[3].trim().length > 0 && row[3] !== 'Unknown';
+          const hasDestination = row[2] && row[2].trim().length > 0 && row[2] !== 'Unknown';
+          
+          return hasMessage && (hasSource || hasDestination);
+        })
+        .map((row) => {
+          const msgData = `${row[0]}_${row[2]}_${row[3]}_${row[5]}`;
+          const hash = crypto.createHash('md5').update(msgData).digest('hex');
+          
+          return {
+            hash: hash,
+            date: row[0] || '',
+            destination_addr: row[2] || '',
+            source_addr: row[3] || '',
+            client: row[4] || '',
+            short_message: row[5] || ''
+          };
+        });
+      
+      console.log(`📊 Fetched ${responseData.aaData.length} total records, ${messages.length} valid messages`);
       return messages;
     }
     
