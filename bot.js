@@ -576,6 +576,20 @@ async function startBot() {
   const browserInitialized = await initializeBrowser();
   
   if (browserInitialized) {
+    // Mark all existing messages as already sent before starting polling
+    console.log('🔄 Fetching existing messages to mark as already sent...');
+    const existingMessages = await fetchLatestSMS();
+    
+    if (existingMessages.length > 0) {
+      existingMessages.forEach(sms => {
+        sentMessageHashes.add(sms.hash);
+      });
+      saveSentMessages();
+      console.log(`✅ Marked ${existingMessages.length} existing messages as already sent`);
+    } else {
+      console.log('✅ No existing messages found');
+    }
+    
     const connectionMessage = `✅ *OTP Bot Connected*
 
 The bot is now active and monitoring for OTPs.
