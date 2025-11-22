@@ -9,8 +9,8 @@ module.exports = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_IDS: [
     '-1003420206708',
-    '-1003151782333',
-    '-1002085925533'
+    '-1002826032710',
+    '-1003341676290'
   ],
   POLL_INTERVAL: parseInt(process.env.POLL_INTERVAL) || 10000,
   MAX_PER_PAGE: parseInt(process.env.MAX_PER_PAGE) || 100
